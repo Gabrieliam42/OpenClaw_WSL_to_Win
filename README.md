@@ -1,6 +1,6 @@
-# WSL_to_Win_OpenClaw
+# OpenClaw_WSL_to_Win
 
-A Windows launcher that starts [OpenClaw](https://openclaw.ai) running inside WSL2 (Ubuntu) and opens the dashboard in your browser. It handles Ollama, the WSL2 gateway service, keepalive, auto-restart, and clean shutdown automatically.
+A bridge launcher that connects Windows to an [OpenClaw](https://openclaw.ai) instance running inside WSL2. It handles everything between the two environments — starting Ollama on Windows, verifying WSL2 can reach it, bringing up the OpenClaw gateway service, opening the dashboard pre-authenticated, and keeping the whole stack alive for as long as the launcher window is open.
 
 ---
 

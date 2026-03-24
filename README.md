@@ -1,6 +1,6 @@
 # OpenClaw_WSL_to_Win
 
-A bridge launcher that connects Windows to the [OpenClaw](https://openclaw.ai) instance running inside WSL2. It handles everything between the two environments — starting Ollama on Windows, verifying WSL2 can reach it, bringing up the OpenClaw gateway service, opening the dashboard pre-authenticated, and keeping the whole stack alive for as long as the launcher window is open.
+A bridge launcher that connects Windows to [OpenClaw](https://openclaw.ai) running inside WSL2. It handles everything between the two environments — starting Ollama on Windows, verifying WSL2 can reach it, bringing up the OpenClaw gateway service, opening the dashboard pre-authenticated, and keeping the whole stack alive for as long as the launcher window is open.
 
 ---
 

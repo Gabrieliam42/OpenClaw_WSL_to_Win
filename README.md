@@ -1,6 +1,6 @@
 # OpenClaw_WSL_to_Win
 
-A bridge launcher that connects Windows to [OpenClaw](https://openclaw.ai) running inside WSL2. It handles everything between the two environments — starting Ollama on Windows, verifying WSL2 can reach it, bringing up the OpenClaw gateway service, opening the dashboard pre-authenticated, and keeping the whole stack alive for as long as the launcher window is open.
+A bridge launcher that connects Windows to [OpenClaw](https://openclaw.ai) running inside WSL2. It handles everything between the two environments — starting Ollama on Windows, verifying WSL2 can reach it, bringing up the OpenClaw gateway service, opening the dashboard in Microsoft Edge pre-authenticated, and keeping the whole stack alive for as long as the launcher window is open.
 
 It works with whatever location you use for your Ollama models, provided the PATH or environment configuration is already set for that.
 
@@ -12,6 +12,7 @@ It works with whatever location you use for your Ollama models, provided the PAT
 - [OpenClaw](https://openclaw.ai) installed inside WSL2 and configured
 - [Ollama](https://ollama.com) installed on Windows (default path: `%LOCALAPPDATA%\Programs\Ollama\ollama.exe`)
 - The OpenClaw gateway systemd service set up in WSL2 (`openclaw-gateway.service`)
+- Microsoft Edge installed on Windows
 
 ---
 
@@ -19,21 +20,21 @@ It works with whatever location you use for your Ollama models, provided the PAT
 
 ### Compiled executable (recommended)
 
-Download `LaunchOpenClaw.exe` from the [Releases](../../releases) page and double-click it. It will:
+Download `LaunchOpenClawWSL.exe` from the [Releases](../../releases) page and double-click it. It will:
 
 1. Request UAC elevation (admin required for WSL2 interactions)
 2. Start Ollama on Windows if it is not already running
 3. Verify WSL2 can reach Ollama
 4. Start the OpenClaw gateway in WSL2 (via systemd service, with a fallback to direct launch)
-5. Open the OpenClaw dashboard in your default browser, pre-authenticated with your gateway token
+5. Open the OpenClaw dashboard in Microsoft Edge, pre-authenticated with your gateway token
 6. Copy the gateway token to your clipboard as a fallback
 7. Keep WSL2 and the gateway alive — auto-restarting if the gateway goes down
 8. Clean up (stop any services it started) when you close the launcher window
 
 ### Python script
 
-```
-python LaunchOpenClaw.py
+```text
+python LaunchOpenClawWSL.py
 ```
 
 Requires Python 3.x on Windows. Same behavior as the exe.
@@ -44,7 +45,7 @@ Requires Python 3.x on Windows. Same behavior as the exe.
 
 ### Startup sequence
 
-```
+```text
 Checking Windows Ollama...
 Checking WSL access to Windows Ollama...
 Starting OpenClaw...
@@ -57,7 +58,7 @@ Keeping WSL/OpenClaw alive until you close this launcher window.
 - **Ollama check**: hits `http://127.0.0.1:11434/api/tags`. If Ollama is not running, launches `ollama.exe serve` as a detached process and waits up to 45 seconds.
 - **WSL bridge check**: runs `curl` inside WSL2 to confirm it can reach the Windows Ollama instance.
 - **Gateway startup**: checks `http://127.0.0.1:18789/`. If not up, tries `systemctl --user start openclaw-gateway.service` first (waits 25 s), then falls back to `nohup openclaw gateway run --force` (waits 30 s).
-- **Token**: reads `~/.openclaw/openclaw.json` inside WSL2, extracts `gateway.auth.token`, builds the dashboard URL as `http://127.0.0.1:18789/#token=<token>`, and opens it. The token is also copied to clipboard.
+- **Token**: reads `~/.openclaw/openclaw.json` inside WSL2, extracts `gateway.auth.token`, builds the dashboard URL as `http://127.0.0.1:18789/#token=<token>`, opens it in Microsoft Edge, and also copies the token to the clipboard.
 
 ### Monitor loop
 
@@ -76,7 +77,7 @@ The launcher only stops services **it started**. If the gateway was already runn
 
 ## Configuration
 
-Edit the constants at the top of `LaunchOpenClaw.py`:
+Edit the constants at the top of `LaunchOpenClawWSL.py`:
 
 | Constant | Default | Description |
 |---|---|---|
@@ -93,9 +94,9 @@ Edit the constants at the top of `LaunchOpenClaw.py`:
 
 Requires [PyInstaller](https://pyinstaller.org):
 
-```
+```text
 pip install pyinstaller
-pyinstaller --onefile --console --name LaunchOpenClaw LaunchOpenClaw.py
+pyinstaller --onefile --console --name LaunchOpenClawWSL LaunchOpenClawWSL.py
 ```
 
-The compiled exe will be in `dist/LaunchOpenClaw.exe`.
+The compiled exe will be in `dist/LaunchOpenClawWSL.exe`.

@@ -341,7 +341,63 @@ def copy_to_clipboard(text):
 
 
 def open_browser(url):
-    os.startfile(url)
+    app_path_subkey = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe"
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        try:
+            with winreg.OpenKey(hive, app_path_subkey) as key:
+                edge_path, _ = winreg.QueryValueEx(key, None)
+        except FileNotFoundError:
+            continue
+
+        edge_exe = Path(edge_path)
+        if edge_exe.exists():
+            subprocess.Popen(
+                [str(edge_exe), url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                close_fds=True,
+            )
+            return
+
+    for base in (
+        os.environ.get("PROGRAMFILES(X86)"),
+        os.environ.get("PROGRAMFILES"),
+        os.environ.get("LOCALAPPDATA"),
+    ):
+        if not base:
+            continue
+
+        edge_exe = Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe"
+        if edge_exe.exists():
+            subprocess.Popen(
+                [str(edge_exe), url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                close_fds=True,
+            )
+            return
+
+    result = subprocess.run(
+        ["where.exe", "msedge.exe"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    for line in result.stdout.splitlines():
+        edge_exe = Path(line.strip())
+        if edge_exe.exists():
+            subprocess.Popen(
+                [str(edge_exe), url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                close_fds=True,
+            )
+            return
+
+    raise FileNotFoundError("Microsoft Edge executable not found.")
 
 
 def build_dashboard_url(token=None):

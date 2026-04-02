@@ -1,6 +1,10 @@
 import ctypes
+import json
+import msvcrt
 import os
+import re
 import shlex
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -11,12 +15,15 @@ DEFAULT_WINDOWS_OPENCLAW_CMD = USER_HOME / "AppData" / "Roaming" / "npm" / "open
 WSL_DISTRO = "Ubuntu"
 WSL_SERVICE_NAME = "openclaw-gateway.service"
 BASE_LINUX_PATH = "/usr/local/bin:/usr/bin:/bin"
+OPENCLAW_VERSION_PATTERN = re.compile(r"\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b")
+SUPPRESS_EXIT_PAUSE = False
 
 
 @dataclass
 class InstallInfo:
     path: str
     version: str
+    package_version: str
 
 
 @dataclass
@@ -24,6 +31,7 @@ class WslResolution:
     npm_path: str
     openclaw_path: str
     version: str
+    package_version: str
 
 
 def print_section(title: str) -> None:
@@ -103,6 +111,29 @@ def relaunch_as_admin() -> None:
         raise RuntimeError(f"Administrator elevation failed with ShellExecuteW rc={rc}")
 
 
+def should_pause_on_exit() -> bool:
+    if os.name != "nt":
+        return False
+    if not getattr(sys, "frozen", False):
+        return False
+    if "--no-pause" in sys.argv[1:]:
+        return False
+    return True
+
+
+def pause_before_exit() -> None:
+    if not should_pause_on_exit():
+        return
+    if SUPPRESS_EXIT_PAUSE:
+        return
+
+    print("\nPress any key to close...")
+    try:
+        msvcrt.getwch()
+    except Exception:
+        pass
+
+
 def parse_key_value_output(text: str) -> dict[str, str]:
     parsed: dict[str, str] = {}
     for line in text.splitlines():
@@ -111,6 +142,29 @@ def parse_key_value_output(text: str) -> dict[str, str]:
         key, value = line.split("=", 1)
         parsed[key.strip()] = value.strip()
     return parsed
+
+
+def parse_openclaw_package_version(version_text: str, context: str) -> str:
+    match = OPENCLAW_VERSION_PATTERN.search(version_text)
+    if not match:
+        raise RuntimeError(f"{context}: could not parse an OpenClaw package version from: {version_text or 'empty output'}")
+    return match.group(1)
+
+
+def get_latest_stable_openclaw_version() -> str:
+    result = ensure_success(
+        run_command([find_windows_npm_cmd(), "view", "openclaw", "dist-tags", "--json"], timeout=60),
+        "Failed to query the latest stable OpenClaw release from npm.",
+    )
+    try:
+        dist_tags = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Failed to parse npm dist-tags output for OpenClaw.") from exc
+
+    latest_version = str(dist_tags.get("latest", "")).strip()
+    if not latest_version:
+        raise RuntimeError("npm did not return a stable 'latest' dist-tag for OpenClaw.")
+    return latest_version
 
 
 def is_windows_backed_wsl_path(path: str) -> bool:
@@ -153,6 +207,18 @@ def find_windows_openclaw_cmd() -> Path:
     )
 
 
+def find_windows_npm_cmd() -> str:
+    npm_cmd = shutil.which("npm.cmd")
+    if npm_cmd:
+        return npm_cmd
+
+    npm_exe = shutil.which("npm.exe")
+    if npm_exe:
+        return npm_exe
+
+    raise FileNotFoundError("Windows npm command not found. Expected npm.cmd or npm.exe on PATH.")
+
+
 def inspect_windows_install() -> InstallInfo:
     source_result = run_powershell("(Get-Command openclaw -ErrorAction Stop).Source")
     source = first_nonempty_line(source_result.stdout)
@@ -167,7 +233,11 @@ def inspect_windows_install() -> InstallInfo:
     if not version:
         raise RuntimeError("Windows PowerShell OpenClaw version output was empty.")
 
-    return InstallInfo(path=source, version=version)
+    return InstallInfo(
+        path=source,
+        version=version,
+        package_version=parse_openclaw_package_version(version, "Windows PowerShell OpenClaw"),
+    )
 
 
 def inspect_wsl_resolution(path_override: str | None = None) -> WslResolution:
@@ -192,6 +262,9 @@ printf 'version=%s\n' "$version"
         npm_path=parsed.get("npm_path", ""),
         openclaw_path=parsed.get("openclaw_path", ""),
         version=parsed.get("version", ""),
+        package_version=parse_openclaw_package_version(parsed.get("version", ""), "WSL OpenClaw")
+        if parsed.get("version", "")
+        else "",
     )
 
 
@@ -278,11 +351,13 @@ def ensure_native_wsl_resolution(resolution: WslResolution, context: str) -> Non
         )
     if not resolution.version:
         raise RuntimeError(f"{context}: openclaw --version produced no output.")
+    if not resolution.package_version:
+        raise RuntimeError(f"{context}: failed to parse the installed WSL OpenClaw package version.")
 
 
 def update_windows_openclaw() -> None:
     ensure_success(
-        run_command(["npm", "install", "-g", "openclaw@latest"], timeout=180),
+        run_command([find_windows_npm_cmd(), "install", "-g", "openclaw@latest"], timeout=180),
         "Failed to update the Windows global OpenClaw npm package.",
     )
 
@@ -340,6 +415,7 @@ def describe_install(label: str, install: InstallInfo) -> None:
     print_section(label)
     print_kv("Path", install.path)
     print_kv("Version", install.version)
+    print_kv("Package version", install.package_version)
 
 
 def describe_wsl_native_install(label: str, resolution: WslResolution, wsl_update_path: str) -> None:
@@ -348,14 +424,19 @@ def describe_wsl_native_install(label: str, resolution: WslResolution, wsl_updat
     print_kv("npm path", resolution.npm_path)
     print_kv("OpenClaw path", resolution.openclaw_path)
     print_kv("Version", resolution.version)
+    print_kv("Package version", resolution.package_version)
 
 
 def main() -> int:
+    global SUPPRESS_EXIT_PAUSE
+    exit_code = 1
     try:
         if os.name == "nt" and not is_admin():
+            SUPPRESS_EXIT_PAUSE = True
             print("Requesting administrator privileges...")
             relaunch_as_admin()
-            return 0
+            exit_code = 0
+            return exit_code
 
         print("Inspecting current OpenClaw installs...")
 
@@ -365,26 +446,52 @@ def main() -> int:
         wsl_update_path = build_wsl_update_path(service_text_before)
         native_wsl_before = inspect_wsl_resolution(wsl_update_path)
         ensure_native_wsl_resolution(native_wsl_before, "Before WSL update")
+        latest_stable_version = get_latest_stable_openclaw_version()
 
         describe_install("Windows PowerShell OpenClaw Before", windows_before)
         describe_wsl_default_resolution(default_wsl_before)
         describe_wsl_native_install("WSL Native OpenClaw Before", native_wsl_before, wsl_update_path)
+        print_section("Latest Stable Release")
+        print_kv("npm 'latest' version", latest_stable_version)
 
         print_section("Updating Windows PowerShell OpenClaw")
-        update_windows_openclaw()
-        print("Windows update complete.")
+        windows_updated = False
+        if windows_before.package_version == latest_stable_version:
+            print(f"Windows is already on stable latest {latest_stable_version}. Skipping update.")
+        else:
+            update_windows_openclaw()
+            windows_updated = True
+            print("Windows update complete.")
 
         print_section("Updating Native WSL OpenClaw")
-        update_wsl_openclaw(wsl_update_path)
-        print("WSL update complete.")
+        wsl_updated = False
+        if native_wsl_before.package_version == latest_stable_version:
+            print(f"WSL is already on stable latest {latest_stable_version}. Skipping update.")
+        else:
+            update_wsl_openclaw(wsl_update_path)
+            wsl_updated = True
+            print("WSL update complete.")
 
         print_section("WSL Bridge Service")
-        service_restart_state = restart_wsl_service_if_needed(wsl_update_path)
+        if wsl_updated:
+            service_restart_state = restart_wsl_service_if_needed(wsl_update_path)
+        else:
+            service_restart_state = "not-needed"
         print_kv("Service action", service_restart_state)
 
         windows_after = inspect_windows_install()
         native_wsl_after = inspect_wsl_resolution(wsl_update_path)
         ensure_native_wsl_resolution(native_wsl_after, "After WSL update")
+        if windows_updated and windows_after.package_version != latest_stable_version:
+            raise RuntimeError(
+                "Windows PowerShell OpenClaw did not reach the expected stable version after the update: "
+                f"expected {latest_stable_version}, got {windows_after.package_version}"
+            )
+        if wsl_updated and native_wsl_after.package_version != latest_stable_version:
+            raise RuntimeError(
+                "WSL OpenClaw did not reach the expected stable version after the update: "
+                f"expected {latest_stable_version}, got {native_wsl_after.package_version}"
+            )
 
         service_text_after = get_wsl_service_unit_text()
         service_exec_path = parse_service_exec_path(service_text_after)
@@ -412,10 +519,13 @@ def main() -> int:
 
         print_section("Done")
         print("OpenClaw updates completed without changing launcher scripts, bridge logic, ports, tokens, or dashboard settings.")
-        return 0
+        exit_code = 0
+        return exit_code
     except Exception as exc:
         print(str(exc), file=sys.stderr)
-        return 1
+        return exit_code
+    finally:
+        pause_before_exit()
 
 
 if __name__ == "__main__":

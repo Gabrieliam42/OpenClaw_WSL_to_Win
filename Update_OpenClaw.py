@@ -1,3 +1,4 @@
+import ctypes
 import os
 import shlex
 import subprocess
@@ -80,6 +81,26 @@ def first_nonempty_line(text: str) -> str:
         if stripped:
             return stripped
     return ""
+
+
+def is_admin() -> bool:
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def relaunch_as_admin() -> None:
+    if getattr(sys, "frozen", False):
+        executable = sys.executable
+        params = subprocess.list2cmdline(sys.argv[1:])
+    else:
+        executable = sys.executable
+        params = subprocess.list2cmdline([str(Path(__file__).resolve()), *sys.argv[1:]])
+
+    rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", executable, params, None, 1)
+    if rc <= 32:
+        raise RuntimeError(f"Administrator elevation failed with ShellExecuteW rc={rc}")
 
 
 def parse_key_value_output(text: str) -> dict[str, str]:
@@ -331,6 +352,11 @@ def describe_wsl_native_install(label: str, resolution: WslResolution, wsl_updat
 
 def main() -> int:
     try:
+        if os.name == "nt" and not is_admin():
+            print("Requesting administrator privileges...")
+            relaunch_as_admin()
+            return 0
+
         print("Inspecting current OpenClaw installs...")
 
         windows_before = inspect_windows_install()

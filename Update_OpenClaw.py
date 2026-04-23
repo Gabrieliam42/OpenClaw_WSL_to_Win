@@ -144,11 +144,49 @@ def parse_key_value_output(text: str) -> dict[str, str]:
     return parsed
 
 
+def extract_openclaw_version_text(*texts: str) -> str:
+    for text in texts:
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped and OPENCLAW_VERSION_PATTERN.search(stripped):
+                return stripped
+    return ""
+
+
 def parse_openclaw_package_version(version_text: str, context: str) -> str:
     match = OPENCLAW_VERSION_PATTERN.search(version_text)
     if not match:
         raise RuntimeError(f"{context}: could not parse an OpenClaw package version from: {version_text or 'empty output'}")
     return match.group(1)
+
+
+def parse_installed_openclaw_package_version(npm_list_text: str, context: str) -> str:
+    try:
+        payload = json.loads(npm_list_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{context}: failed to parse npm package metadata for OpenClaw.") from exc
+
+    dependencies = payload.get("dependencies")
+    if not isinstance(dependencies, dict):
+        raise RuntimeError(f"{context}: npm package metadata did not include dependencies.")
+
+    openclaw_dependency = dependencies.get("openclaw")
+    if not isinstance(openclaw_dependency, dict):
+        raise RuntimeError(f"{context}: OpenClaw is not installed in the queried npm scope.")
+
+    version = str(openclaw_dependency.get("version", "")).strip()
+    if not version:
+        raise RuntimeError(f"{context}: npm package metadata did not include the installed OpenClaw version.")
+
+    return parse_openclaw_package_version(version, context)
+
+
+def format_version_display(version_text: str, package_version: str) -> str:
+    if version_text:
+        return version_text
+    if package_version:
+        return f"OpenClaw {package_version} (from npm metadata)"
+    return ""
 
 
 def get_latest_stable_openclaw_version() -> str:
@@ -219,24 +257,44 @@ def find_windows_npm_cmd() -> str:
     raise FileNotFoundError("Windows npm command not found. Expected npm.cmd or npm.exe on PATH.")
 
 
+def get_windows_installed_package_version() -> str:
+    result = ensure_success(
+        run_command([find_windows_npm_cmd(), "list", "-g", "openclaw", "--depth=0", "--json"], timeout=60),
+        "Failed to query the installed Windows OpenClaw npm package version.",
+    )
+    return parse_installed_openclaw_package_version(result.stdout, "Windows PowerShell OpenClaw")
+
+
+def get_wsl_installed_package_version(path_override: str | None = None) -> str:
+    export_path = ""
+    if path_override:
+        export_path = f"export PATH={shlex.quote(path_override)}\n"
+
+    command = f"""{export_path}npm list -g openclaw --depth=0 --json"""
+    result = ensure_success(
+        run_wsl_bash(command, timeout=60),
+        "Failed to query the installed WSL OpenClaw npm package version.",
+    )
+    return parse_installed_openclaw_package_version(result.stdout, "WSL OpenClaw")
+
+
 def inspect_windows_install() -> InstallInfo:
     source_result = run_powershell("(Get-Command openclaw -ErrorAction Stop).Source")
     source = first_nonempty_line(source_result.stdout)
     if not source:
         source = str(find_windows_openclaw_cmd())
 
-    version_result = ensure_success(
-        run_powershell("openclaw --version"),
-        "Failed to read the Windows PowerShell OpenClaw version.",
+    package_version = get_windows_installed_package_version()
+    version_result = run_powershell("openclaw --version")
+    version = format_version_display(
+        extract_openclaw_version_text(version_result.stdout, version_result.stderr),
+        package_version,
     )
-    version = first_nonempty_line(version_result.stdout)
-    if not version:
-        raise RuntimeError("Windows PowerShell OpenClaw version output was empty.")
 
     return InstallInfo(
         path=source,
         version=version,
-        package_version=parse_openclaw_package_version(version, "Windows PowerShell OpenClaw"),
+        package_version=package_version,
     )
 
 
@@ -250,7 +308,7 @@ npm_path="$(command -v npm 2>/dev/null || true)"
 openclaw_path="$(command -v openclaw 2>/dev/null || true)"
 version=""
 if [ -n "$openclaw_path" ]; then
-  version="$(openclaw --version 2>/dev/null | head -n 1 || true)"
+  version="$(openclaw --version 2>&1 | head -n 1 || true)"
 fi
 printf 'npm_path=%s\n' "$npm_path"
 printf 'openclaw_path=%s\n' "$openclaw_path"
@@ -258,13 +316,27 @@ printf 'version=%s\n' "$version"
 """
     result = run_wsl_bash(command)
     parsed = parse_key_value_output(result.stdout)
+    package_version = ""
+    package_version_error: RuntimeError | None = None
+    if parsed.get("npm_path", ""):
+        try:
+            package_version = get_wsl_installed_package_version(path_override)
+        except RuntimeError as exc:
+            package_version_error = exc
+
+    if path_override and package_version_error is not None:
+        raise package_version_error
+
+    version = format_version_display(
+        extract_openclaw_version_text(parsed.get("version", "")),
+        package_version,
+    )
+
     return WslResolution(
         npm_path=parsed.get("npm_path", ""),
         openclaw_path=parsed.get("openclaw_path", ""),
-        version=parsed.get("version", ""),
-        package_version=parse_openclaw_package_version(parsed.get("version", ""), "WSL OpenClaw")
-        if parsed.get("version", "")
-        else "",
+        version=version,
+        package_version=package_version,
     )
 
 
@@ -349,10 +421,8 @@ def ensure_native_wsl_resolution(resolution: WslResolution, context: str) -> Non
         raise RuntimeError(
             f"{context}: openclaw does not resolve to a native Linux path: {resolution.openclaw_path or 'not found'}"
         )
-    if not resolution.version:
-        raise RuntimeError(f"{context}: openclaw --version produced no output.")
     if not resolution.package_version:
-        raise RuntimeError(f"{context}: failed to parse the installed WSL OpenClaw package version.")
+        raise RuntimeError(f"{context}: failed to resolve the installed WSL OpenClaw package version from npm metadata.")
 
 
 def update_windows_openclaw() -> None:

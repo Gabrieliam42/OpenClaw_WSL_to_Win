@@ -29,6 +29,7 @@ WSL_SERVICE_NAME = "openclaw-gateway.service"
 WSL_SERVICE_IS_ACTIVE = f"systemctl --user is-active --quiet {WSL_SERVICE_NAME}"
 WSL_SERVICE_START = f"systemctl --user start {WSL_SERVICE_NAME} >/dev/null 2>&1 || true"
 WSL_SERVICE_STOP = f"systemctl --user stop {WSL_SERVICE_NAME} >/dev/null 2>&1 || true"
+WSL_BONJOUR_PLUGIN_ID = "bonjour"
 BASE_LINUX_PATH = "/usr/local/bin:/usr/bin:/bin"
 WSL_FALLBACK_START = (
     "mkdir -p ~/.openclaw/logs; "
@@ -40,6 +41,8 @@ WSL_ACTIVE_CONNECTIONS_COMMAND = (
     "ss -Htn state established '( sport = :18789 )' 2>/dev/null | wc -l"
 )
 MONITOR_POLL_SECONDS = 5
+MONITOR_RESTART_FAILURES = 3
+MONITOR_RESTART_SECONDS = 15
 IDLE_EXIT_SECONDS = 300
 
 CTRL_C_EVENT = 0
@@ -230,15 +233,52 @@ def run_native_openclaw(*args, capture_output=False, timeout=None):
     return run_wsl_bash(command, capture_output=capture_output, timeout=timeout)
 
 
+def ensure_wsl_bonjour_disabled():
+    config_path = f"plugins.entries.{WSL_BONJOUR_PLUGIN_ID}.enabled"
+    result = run_native_openclaw(
+        "config",
+        "get",
+        config_path,
+        capture_output=True,
+        timeout=25,
+    )
+    if result.returncode == 0 and first_nonempty_line(result.stdout).lower() == "false":
+        return False
+
+    result = run_native_openclaw(
+        "plugins",
+        "disable",
+        WSL_BONJOUR_PLUGIN_ID,
+        capture_output=True,
+        timeout=45,
+    )
+    if result.returncode == 0:
+        return True
+
+    details = first_nonempty_line(f"{result.stderr}\n{result.stdout}") or "no details"
+    lowered = details.lower()
+    if "not found" in lowered or "unknown" in lowered:
+        status("WSL Bonjour plugin is not available; continuing without changing it.")
+        return False
+
+    status(f"Warning: could not disable WSL Bonjour plugin: {details}")
+    return False
+
+
 def wsl_gateway_is_listening():
     try:
         result = run_wsl_bash(
-            "ss -H -ltn '( sport = :18789 )' 2>/dev/null | grep -q .",
+            "ss -H -ltn 2>/dev/null | awk '$4 ~ /:18789$/ { found=1 } END { exit found ? 0 : 1 }'",
             timeout=8,
         )
     except (subprocess.SubprocessError, OSError):
         return False
     return result.returncode == 0
+
+
+def restart_wsl_openclaw_service():
+    run_wsl_bash(WSL_SERVICE_STOP, timeout=20)
+    wait_for_url_down(DASHBOARD_URL, 15)
 
 
 def stop_windows_openclaw_for_wsl():
@@ -603,6 +643,8 @@ def monitor_openclaw():
     keepalive_process = start_wsl_keepalive()
     set_keepalive_process(keepalive_process)
     dashboard_was_ready = http_ok(DASHBOARD_URL)
+    failure_count = 0
+    outage_started = None
 
     status("Keeping WSL/OpenClaw alive until you close this launcher window.")
 
@@ -614,13 +656,34 @@ def monitor_openclaw():
                 set_keepalive_process(keepalive_process)
 
             dashboard_ready = http_ok(DASHBOARD_URL)
-            if not dashboard_ready:
-                if dashboard_was_ready:
-                    status("OpenClaw became unreachable. Restarting it.")
-                if not ensure_openclaw():
-                    time.sleep(MONITOR_POLL_SECONDS)
-                    continue
-                dashboard_ready = True
+            if dashboard_ready:
+                if failure_count and dashboard_was_ready:
+                    status("OpenClaw is reachable again.")
+                failure_count = 0
+                outage_started = None
+                dashboard_was_ready = True
+                time.sleep(MONITOR_POLL_SECONDS)
+                continue
+
+            failure_count += 1
+            if outage_started is None:
+                outage_started = time.time()
+
+            outage_seconds = time.time() - outage_started
+            if failure_count < MONITOR_RESTART_FAILURES or outage_seconds < MONITOR_RESTART_SECONDS:
+                time.sleep(MONITOR_POLL_SECONDS)
+                continue
+
+            if dashboard_was_ready:
+                status("OpenClaw became unreachable. Restarting it.")
+            if not ensure_openclaw():
+                time.sleep(MONITOR_POLL_SECONDS)
+                continue
+
+            failure_count = 0
+            outage_started = None
+            dashboard_ready = True
+            if dashboard_was_ready:
                 status("OpenClaw is reachable again.")
 
             dashboard_was_ready = dashboard_ready
@@ -652,8 +715,15 @@ def main():
     if not ensure_wsl_bridge():
         raise RuntimeError("WSL could not reach Windows Ollama at http://127.0.0.1:11434.")
 
+    status("Checking WSL Bonjour plugin...")
+    bonjour_config_changed = ensure_wsl_bonjour_disabled()
+
     status("Stopping Windows OpenClaw if needed...")
     stop_windows_openclaw_for_wsl()
+
+    if bonjour_config_changed:
+        status("Restarting WSL OpenClaw to apply plugin settings...")
+        restart_wsl_openclaw_service()
 
     status("Starting OpenClaw...")
     if not ensure_openclaw():
